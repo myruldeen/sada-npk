@@ -16,6 +16,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include "DHT.h"
+#include <SoftwareSerial.h>
 
 char auth[] = BLYNK_AUTH_TOKEN;
 
@@ -24,6 +25,17 @@ char auth[] = BLYNK_AUTH_TOKEN;
 char ssid[] = "4GMIFI_1022";
 char pass[] = "1234567890";
 
+#define RS485Power          18
+#define RS485RX             10
+#define RS485TX             9
+
+#define sensorFrameSize     19
+#define sensorWaitingTime   1000
+#define sensorID            0x01
+#define sensorFunction      0x03
+#define sensorByteResponse  0x0E
+
+
 #define ONE_WIRE_BUS 2
 
 #define DHTTYPE DHT11   // DHT 11
@@ -31,6 +43,12 @@ char pass[] = "1234567890";
 #define buzzer 9        //buzzer to esp8266 gpio pin 9
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
+SoftwareSerial sensor(RS485RX, RS485TX);
+
+unsigned char byteRequest[8] = {0X01, 0X03, 0X00, 0X00, 0X00, 0X07, 0X04, 0X08};
+unsigned char byteResponse[19] = {};
+
+float moisture, temperature, ph, nitrogen, phosphorus, potassium;
 
 int sensorPin = A0;
 int sensorValue1 = 0;
@@ -56,6 +74,12 @@ void setup()
   // Debug console
   Serial.begin(115200);
   sensors.begin();
+
+  sensor.begin(4800);
+  pinMode(RS485Power, OUTPUT);
+
+  digitalWrite(RS485Power, HIGH);
+
   Blynk.begin(auth, ssid, pass);
   // You can also specify server:
   //Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
@@ -70,7 +94,10 @@ void setup()
   pinMode(buzzer, OUTPUT);
   dht.begin();
 
-  delay(10);
+  //  delay(10);
+  delay(1000);
+  Serial.println();
+  Serial.println("Agriculture Kit Sensor Ready");
 }
 
 void loop()
@@ -78,6 +105,46 @@ void loop()
   now = millis();
   if (now - lastMeasure > 10000) {
     lastMeasure = now;
+
+    // NPK Process
+    sensor.write(byteRequest, 8);
+
+    unsigned long resptime = millis();
+    while ((sensor.available() < sensorFrameSize) && ((millis() - resptime) < sensorWaitingTime)) {
+      delay(1);
+    }
+
+    while (sensor.available()) {
+      for (int n = 0; n < sensorFrameSize; n++) {
+        byteResponse[n] = sensor.read();
+      }
+
+      if (byteResponse[0] != sensorID && byteResponse[1] != sensorFunction && byteResponse[2] != sensorByteResponse) {
+        return;
+      }
+    }
+
+    Serial.println();
+    Serial.println("===== SOIL PARAMETERS");
+    Serial.print("Byte Response: ");
+
+    String responseString;
+    for (int j = 0; j < 19; j++) {
+      responseString += byteResponse[j] < 0x10 ? " 0" : " ";
+      responseString += String(byteResponse[j], HEX);
+      responseString.toUpperCase();
+    }
+    Serial.println(responseString);
+
+    nitrogen = sensorValue((int)byteResponse[3], (int)byteResponse[4]);
+    phosphorus = sensorValue((int)byteResponse[5], (int)byteResponse[6]);
+    potassium = sensorValue((int)byteResponse[7], (int)byteResponse[8]);
+
+    Serial.println("Nitrogen (N): " + (String)nitrogen + " mg/kg");
+    Serial.println("Phosporus (P): " + (String)phosphorus + " mg/kg");
+    Serial.println("Potassium (K): " + (String)potassium + " mg/kg");
+
+    //
 
     sensors.requestTemperatures();
     //digitalWrite(ON_OFF, HIGH);
@@ -88,14 +155,14 @@ void loop()
     // Match the request
     int i = 0;
     int moisture_percentage = 0;
-  
+
     int m1 = 0;
     int m2 = 0;
-  
+
     h = dht.readHumidity();    //Read humidity level
     t = dht.readTemperature(); //Read temperature in celcius
     // f = (h * 1.8) + 32;        //Temperature converted to Fahrenheit
-  
+
     digitalWrite(S0, LOW);
     digitalWrite(S1, LOW);
     digitalWrite(S2, LOW);
@@ -124,8 +191,8 @@ void loop()
     //   sensorValue3 = ( 100 - ( (analogRead(sensorPin)/1024) * 100 ) );
     sensorValue3 = (analogRead(sensorPin)); delay(1);
     light = map(sensorValue3, 0, 1023, 10, 0);
-  
-  
+
+
     if (m1 > 700)
     {
       digitalWrite(SW, LOW);
@@ -135,7 +202,7 @@ void loop()
       digitalWrite(SW, HIGH);
       tone(buzzer, 1000);
     }
-  
+
     delay(10);
     // int j;
     if (m2 > 700)
@@ -158,7 +225,20 @@ void loop()
     Blynk.virtualWrite(V8, light);  // light
     Blynk.virtualWrite(V10, t); // temperature
     Blynk.virtualWrite(V11, h); // humidity
+
+    //    NPK Part add blynk virtual pin
+    Blynk.virtualWrite(V12, nitrogen);  // Nitrogen (N)
+    Blynk.virtualWrite(V13, phosphorus); // Phosphorus (P)
+    Blynk.virtualWrite(V14, potassium); // Potassium (K)
   }
-  
-  
+
+
+}
+
+int sensorValue(int x, int y) {
+  int t = 0;
+  t = x * 256;
+  t = t + y;
+
+  return t;
 }
